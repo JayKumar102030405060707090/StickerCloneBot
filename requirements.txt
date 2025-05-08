@@ -1,3 +1,6 @@
 flask
 yt-dlp
 youtube-search-python
+uvicorn
+pydantic
+youtubesearchpython
