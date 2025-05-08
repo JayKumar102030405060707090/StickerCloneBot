@@ -1,4 +1,0 @@
-API_ID = "21272024"
-API_HASH = "f9bf813bab54bc6fbf7aaedc19c73eab"
-BOT_TOKEN = "8125508982:AAFeBxsjQ-kabNSLzH5Tn9q97chMt2Q0RY8"
-OWNER_ID = 7168729089  # अपना Telegram ID डालो
