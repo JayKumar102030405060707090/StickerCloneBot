@@ -40,4 +40,5 @@ def stream():
     return jsonify({"stream_url": stream_url, "status": "success"})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=1470)
+    port = int(os.environ.get('PORT', 5000))  # <== THIS IS THE FIX
+    app.run(host='0.0.0.0', port=port)
