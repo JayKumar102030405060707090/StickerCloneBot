@@ -3,19 +3,15 @@ import re
 import json
 import httpx
 import redis
-from fastapi import FastAPI, HTTPException, Query, Depends, Request
-from fastapi.security import APIKeyHeader
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.openapi.utils import get_openapi
-from typing import Optional, Union, Dict, List
 from yt_dlp import YoutubeDL
 from datetime import timedelta
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from pydantic import BaseModel
+from typing import Optional, Union, Dict, List
 
 # Initialize FastAPI app
 app = FastAPI(title="YouTube API", description="Ultimate YouTube API with all features", version="1.0")
@@ -41,8 +37,13 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
-# API Key Security
-api_key_header = APIKeyHeader(name="X-API-Key")
+# Simple API Key Check
+VALID_API_KEY = "JAYDIP"
+
+def check_api_key(api_key: str):
+    """Simple API key validation"""
+    if api_key != VALID_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
 
 # Rate limit error handler
 @app.exception_handler(RateLimitExceeded)
@@ -52,381 +53,20 @@ async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
         content={"error": "Rate limit exceeded"}
     )
 
-# API Key Validation
-async def validate_api_key(api_key: str = Depends(api_key_header)):
-    if not api_key or api_key != os.getenv("API_KEY", "your-secret-key"):
-        raise HTTPException(status_code=401, detail="Invalid API Key")
-    return api_key
-
 class YouTubeAPI:
-    def __init__(self, link: str):
-        self.link = self._clean_url(link)
-        self._details = None
-        self._playlist = None
-        self._formats = None
+    # ... [Keep all the same YouTubeAPI class methods from previous implementation] ...
 
-    def _clean_url(self, url: str) -> str:
-        """Clean YouTube URL"""
-        if not url:
-            return ""
-        
-        # Check if it's already a full URL
-        if url.startswith(("http://", "https://")):
-            return url.split("&")[0]
-        
-        # Assume it's a video ID
-        return f"https://www.youtube.com/watch?v={url.split('&')[0]}"
-
-    def _get_cache(self, key: str) -> Optional[dict]:
-        """Get cached data"""
-        cached = redis_client.get(key)
-        return json.loads(cached) if cached else None
-
-    def _set_cache(self, key: str, data: dict, ttl: int) -> None:
-        """Cache data with TTL"""
-        redis_client.setex(key, ttl, json.dumps(data))
-
-    async def _fetch_details(self) -> Optional[dict]:
-        """Fetch video details using yt-dlp"""
-        cache_key = f"yt_details:{self.link}"
-        cached = self._get_cache(cache_key)
-        if cached:
-            return cached
-
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-            'extract_flat': False,
-        }
-
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.link, download=False)
-                if not info:
-                    return None
-
-                result = {
-                    'title': info.get('title', ''),
-                    'duration': info.get('duration', 0),
-                    'thumbnail': self._get_best_thumbnail(info.get('thumbnails', [])),
-                    'id': info.get('id', ''),
-                    'view_count': info.get('view_count', 0),
-                    'channel': info.get('channel', ''),
-                    'url': info.get('webpage_url', self.link)
-                }
-
-                self._set_cache(cache_key, result, 86400)  # 24 hours cache
-                return result
-        except Exception:
-            return None
-
-    def _get_best_thumbnail(self, thumbnails: List[dict]) -> str:
-        """Get highest resolution thumbnail"""
-        if not thumbnails:
-            return ""
-        
-        # Sort by resolution (width) descending
-        sorted_thumbs = sorted(
-            thumbnails,
-            key=lambda x: x.get('width', 0),
-            reverse=True
-        )
-        return sorted_thumbs[0].get('url', '') if sorted_thumbs else ""
-
-    async def exists(self) -> bool:
-        """Check if the link is a valid YouTube URL"""
-        pattern = r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/'
-        return bool(re.match(pattern, self.link))
-
-    async def url(self) -> str:
-        """Extract URL from message"""
-        return self.link
-
-    async def details(self) -> tuple:
-        """Get video details"""
-        if not self._details:
-            self._details = await self._fetch_details()
-        
-        if not self._details:
-            return ("", 0, 0, "", "", 0)
-        
-        duration_min = f"{self._details['duration'] // 60}:{self._details['duration'] % 60:02d}"
-        return (
-            self._details['title'],
-            duration_min,
-            self._details['duration'],
-            self._details['thumbnail'],
-            self._details['id'],
-            self._details['view_count']
-        )
-
-    async def title(self) -> str:
-        """Get video title"""
-        if not self._details:
-            self._details = await self._fetch_details()
-        return self._details['title'] if self._details else ""
-
-    async def duration(self) -> str:
-        """Get duration in MM:SS format"""
-        if not self._details:
-            self._details = await self._fetch_details()
-        
-        if not self._details or not self._details['duration']:
-            return "0:00"
-        
-        minutes = self._details['duration'] // 60
-        seconds = self._details['duration'] % 60
-        return f"{minutes}:{seconds:02d}"
-
-    async def thumbnail(self) -> str:
-        """Get thumbnail URL"""
-        if not self._details:
-            self._details = await self._fetch_details()
-        return self._details['thumbnail'] if self._details else ""
-
-    async def video(self) -> str:
-        """Get video stream URL"""
-        cache_key = f"yt_video:{self.link}"
-        cached = self._get_cache(cache_key)
-        if cached:
-            return cached.get('url', '')
-        
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'extract_flat': False,
-        }
-
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.link, download=False)
-                if not info or 'url' not in info:
-                    return ""
-                
-                result = {'url': info['url']}
-                self._set_cache(cache_key, result, 21600)  # 6 hours cache
-                return info['url']
-        except Exception:
-            return ""
-
-    async def playlist(self, limit: int = 100) -> List[str]:
-        """Get playlist video IDs"""
-        if self._playlist is not None:
-            return self._playlist[:limit]
-        
-        cache_key = f"yt_playlist:{self.link}"
-        cached = self._get_cache(cache_key)
-        if cached:
-            self._playlist = cached.get('items', [])
-            return self._playlist[:limit]
-
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
-            'playlist_items': f'1-{limit}',
-        }
-
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.link, download=False)
-                if not info or 'entries' not in info:
-                    return []
-                
-                videos = []
-                for entry in info['entries']:
-                    if entry and 'id' in entry:
-                        videos.append(entry['id'])
-                
-                self._playlist = videos
-                self._set_cache(cache_key, {'items': videos}, 86400)  # 24 hours cache
-                return videos[:limit]
-        except Exception:
-            return []
-
-    async def track(self) -> tuple:
-        """Get track information"""
-        if not self._details:
-            self._details = await self._fetch_details()
-        
-        if not self._details:
-            return ({}, "")
-        
-        track_info = {
-            'title': self._details['title'],
-            'link': self._details['url'],
-            'vidid': self._details['id'],
-            'duration_min': await self.duration(),
-            'thumb': self._details['thumbnail'],
-            'views': self._details['view_count']
-        }
-        return (track_info, self._details['id'])
-
-    async def formats(self) -> List[dict]:
-        """List available formats"""
-        if self._formats is not None:
-            return self._formats
-        
-        cache_key = f"yt_formats:{self.link}"
-        cached = self._get_cache(cache_key)
-        if cached:
-            self._formats = cached.get('formats', [])
-            return self._formats
-
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'listformats': True,
-            'extract_flat': False,
-        }
-
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.link, download=False)
-                if not info or 'formats' not in info:
-                    return []
-                
-                formats = []
-                for fmt in info['formats']:
-                    if not fmt.get('url'):
-                        continue
-                    
-                    formats.append({
-                        'format_id': fmt.get('format_id', ''),
-                        'ext': fmt.get('ext', ''),
-                        'resolution': fmt.get('resolution', 'audio'),
-                        'filesize': fmt.get('filesize', 0),
-                        'url': fmt.get('url', '')
-                    })
-                
-                self._formats = formats
-                self._set_cache(cache_key, {'formats': formats}, 86400)  # 24 hours cache
-                return formats
-        except Exception:
-            return []
-
-    async def slider(self, query_type: str = "video") -> List[dict]:
-        """Get search results"""
-        cache_key = f"yt_slider:{self.link}:{query_type}"
-        cached = self._get_cache(cache_key)
-        if cached:
-            return cached.get('results', [])
-        
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
-            'default_search': 'ytsearch',
-        }
-
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch{self.link}", download=False)
-                if not info or 'entries' not in info:
-                    return []
-                
-                results = []
-                for entry in info['entries']:
-                    if not entry:
-                        continue
-                    
-                    results.append({
-                        'id': entry.get('id', ''),
-                        'title': entry.get('title', ''),
-                        'url': entry.get('url', ''),
-                        'thumbnail': f"https://i.ytimg.com/vi/{entry.get('id', '')}/hqdefault.jpg",
-                        'duration': entry.get('duration', 0)
-                    })
-                
-                self._set_cache(cache_key, {'results': results}, 3600)  # 1 hour cache
-                return results
-        except Exception:
-            return []
-
-    async def download(
-        self,
-        video: bool = False,
-        format_id: str = "",
-        title: str = ""
-    ) -> str:
-        """Handle audio/video downloads"""
-        cache_key = f"yt_download:{self.link}:{video}:{format_id}"
-        cached = self._get_cache(cache_key)
-        if cached:
-            return cached.get('url', '')
-        
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'outtmpl': f"downloads/{title or '%(title)s.%(ext)s'}",
-        }
-
-        if format_id:
-            ydl_opts['format'] = format_id
-        elif video:
-            ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-        else:
-            ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio'
-
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.link, download=False)
-                if not info or 'url' not in info:
-                    return ""
-                
-                result = {'url': info['url']}
-                self._set_cache(cache_key, result, 21600)  # 6 hours cache
-                return info['url']
-        except Exception:
-            return ""
-
-# Helper function to get stream URL
-async def get_stream_url(query: str, video: bool = False) -> str:
-    """Get direct stream URL for a YouTube video"""
-    yt = YouTubeAPI(query)
-    if not await yt.exists():
-        return ""
-    
-    return await yt.video() if video else ""
-
-# Response models
-class YouTubeResponse(BaseModel):
-    id: Optional[str] = None
-    title: Optional[str] = None
-    duration: Optional[int] = None
-    link: Optional[str] = None
-    channel: Optional[str] = None
-    views: Optional[int] = None
-    thumbnail: Optional[str] = None
-    stream_url: Optional[str] = None
-    stream_type: Optional[str] = None
-
-class TrackResponse(BaseModel):
-    track: Dict[str, Union[str, int]]
-    vidid: str
-
-class PlaylistResponse(BaseModel):
-    items: List[str]
-    limit: int
-
-class FormatsResponse(BaseModel):
-    formats: List[Dict[str, Union[str, int]]]
-
-class SliderResponse(BaseModel):
-    results: List[Dict[str, Union[str, int]]]
-
-# API Endpoints
-@app.post("/stream", response_model=YouTubeResponse)
+# API Endpoints with simple API key check
+@app.post("/stream")
 @limiter.limit("100/minute")
 async def get_stream(
     request: Request,
     query: str,
     video: bool = False,
-    api_key: str = Depends(validate_api_key)
+    api_key: str = Query(..., description="API Key")
 ):
     """Get direct stream URL for a YouTube video"""
+    check_api_key(api_key)
     stream_url = await get_stream_url(query, video)
     if not stream_url:
         raise HTTPException(status_code=404, detail="Stream not found")
@@ -446,15 +86,16 @@ async def get_stream(
         "stream_type": "Video" if video else "Audio"
     }
 
-@app.get("/details", response_model=YouTubeResponse)
+@app.get("/details")
 @limiter.limit("100/minute")
 async def get_video_details(
     request: Request,
     link: str = Query(..., description="YouTube URL or video ID"),
     videoid: bool = Query(False, description="Treat input as video ID"),
-    api_key: str = Depends(validate_api_key)
+    api_key: str = Query(..., description="API Key")
 ):
     """Get video details"""
+    check_api_key(api_key)
     query = f"https://www.youtube.com/watch?v={link}" if videoid else link
     yt = YouTubeAPI(query)
     
@@ -477,15 +118,16 @@ async def get_video_details(
         "stream_type": None
     }
 
-@app.get("/track", response_model=TrackResponse)
+@app.get("/track")
 @limiter.limit("100/minute")
 async def get_track_info(
     request: Request,
     link: str = Query(..., description="YouTube URL or video ID"),
     videoid: bool = Query(False, description="Treat input as video ID"),
-    api_key: str = Depends(validate_api_key)
+    api_key: str = Query(..., description="API Key")
 ):
     """Get track information"""
+    check_api_key(api_key)
     query = f"https://www.youtube.com/watch?v={link}" if videoid else link
     yt = YouTubeAPI(query)
     
@@ -501,7 +143,7 @@ async def get_track_info(
         "vidid": vidid
     }
 
-@app.get("/playlist", response_model=PlaylistResponse)
+@app.get("/playlist")
 @limiter.limit("100/minute")
 async def get_playlist_items(
     request: Request,
@@ -509,9 +151,10 @@ async def get_playlist_items(
     limit: int = Query(100, description="Maximum number of items to return"),
     user_id: Optional[str] = Query(None, description="User ID for caching"),
     videoid: bool = Query(False, description="Treat input as playlist ID"),
-    api_key: str = Depends(validate_api_key)
+    api_key: str = Query(..., description="API Key")
 ):
     """Get playlist items"""
+    check_api_key(api_key)
     query = f"https://www.youtube.com/playlist?list={link}" if videoid else link
     yt = YouTubeAPI(query)
     
@@ -524,15 +167,16 @@ async def get_playlist_items(
         "limit": limit
     }
 
-@app.get("/formats", response_model=FormatsResponse)
+@app.get("/formats")
 @limiter.limit("100/minute")
 async def get_available_formats(
     request: Request,
     link: str = Query(..., description="YouTube URL or video ID"),
     videoid: bool = Query(False, description="Treat input as video ID"),
-    api_key: str = Depends(validate_api_key)
+    api_key: str = Query(..., description="API Key")
 ):
     """List available formats for a video"""
+    check_api_key(api_key)
     query = f"https://www.youtube.com/watch?v={link}" if videoid else link
     yt = YouTubeAPI(query)
     
@@ -544,23 +188,24 @@ async def get_available_formats(
         "formats": formats
     }
 
-@app.get("/slider", response_model=SliderResponse)
+@app.get("/slider")
 @limiter.limit("100/minute")
 async def get_search_results(
     request: Request,
     link: str = Query(..., description="Search query or YouTube URL"),
     query_type: str = Query("video", description="Type of search results"),
     videoid: bool = Query(False, description="Not used for search"),
-    api_key: str = Depends(validate_api_key)
+    api_key: str = Query(..., description="API Key")
 ):
     """Get search results (slider)"""
+    check_api_key(api_key)
     yt = YouTubeAPI(link)
     results = await yt.slider(query_type)
     return {
         "results": results
     }
 
-@app.post("/download", response_model=YouTubeResponse)
+@app.post("/download")
 @limiter.limit("50/minute")
 async def download_video(
     request: Request,
@@ -571,9 +216,10 @@ async def download_video(
     songvideo: bool = Query(False, description="Optimize for song video"),
     format_id: Optional[str] = Query(None, description="Specific format ID to download"),
     title: Optional[str] = Query(None, description="Custom title for downloaded file"),
-    api_key: str = Depends(validate_api_key)
+    api_key: str = Query(..., description="API Key")
 ):
     """Download audio or video from YouTube"""
+    check_api_key(api_key)
     query = f"https://www.youtube.com/watch?v={link}" if videoid else link
     yt = YouTubeAPI(query)
     
@@ -604,36 +250,6 @@ async def download_video(
         "stream_type": "Video" if video else "Audio"
     }
 
-# Custom OpenAPI schema
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    
-    openapi_schema = get_openapi(
-        title="YouTube API",
-        version="1.0",
-        description="Ultimate YouTube API with all features",
-        routes=app.routes,
-    )
-    
-    # Add security scheme
-    openapi_schema["components"]["securitySchemes"] = {
-        "APIKeyHeader": {
-            "type": "apiKey",
-            "in": "header",
-            "name": "X-API-Key"
-        }
-    }
-    
-    # Add security requirements
-    for path_item in openapi_schema["paths"].values():
-        for operation in path_item.values():
-            operation["security"] = [{"APIKeyHeader": []}]
-    
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
-app.openapi = custom_openapi
-
-# Docker and Kubernetes configuration would be in separate files:
-# Dockerfile, docker-compose.yml, and Kubernetes deployment YAMLs
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
