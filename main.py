@@ -1,10 +1,9 @@
 import os
 import re
 import redis
-import uuid
 from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from yt_dlp import YoutubeDL
 from slowapi import Limiter
@@ -163,72 +162,81 @@ class YouTubeAPI:
             except:
                 return None
 
-@app.get("/youtube")
-@limiter.limit("100/minute")
-async def youtube_endpoint(
-    request: Request,
-    query: str,
-    video: bool = False,
-    api_key: Optional[str] = None
-):
-    # Generate a unique ID for stream URL
-    stream_id = str(uuid.uuid4())
-    
-    # Check if query is a URL or search term
-    if not (query.startswith("http://") or query.startswith("https://")):
-        # Perform search
-        yt_search = YouTubeAPI(f"ytsearch1:{query}")
-        search_results = await yt_search.slider(query_type="video")
-        if not search_results:
-            raise HTTPException(status_code=404, detail="No results found")
-        query = f"https://youtube.com/watch?v={search_results[0]['id']}"
-    
-    yt = YouTubeAPI(query)
-    details = await yt._fetch_details()
-    if not details:
-        raise HTTPException(status_code=404, detail="Video not found")
-    
-    # Store the original query in Redis with stream_id as key
-    redis_client.setex(f"stream:{stream_id}", 3600, query)  # Expires in 1 hour
-    
-    # Generate stream URL in same format as your friend's API
-    base_url = str(request.base_url).rstrip("/")
-    stream_url = f"{base_url}/stream/{stream_id}"
-    
+async def make_response(details, stream_url=None, stream_type=None):
     return {
-        "id": details.get('id'),
-        "title": details.get('title'),
-        "duration": details.get('duration'),
-        "link": details.get('url'),
-        "channel": details.get('channel'),
-        "views": details.get('view_count'),
-        "thumbnail": details.get('thumbnail'),
-        "stream_url": stream_url,
-        "stream_type": "Video" if video else "Audio"
+        "id": details.get('id') if details else None,
+        "title": details.get('title') if details else None,
+        "duration": details.get('duration') if details else None,
+        "link": details.get('url') if details else None,
+        "channel": details.get('channel') if details else None,
+        "views": details.get('view_count') if details else None,
+        "thumbnail": details.get('thumbnail') if details else None,
+        "stream_url": stream_url or None,
+        "stream_type": stream_type or None
     }
 
-@app.get("/stream/{stream_id}")
+@app.post("/stream")
 @limiter.limit("100/minute")
-async def stream_proxy(
-    request: Request,
-    stream_id: str,
-    video: bool = False
-):
-    # Get the original query from Redis
-    original_query = redis_client.get(f"stream:{stream_id}")
-    if not original_query:
-        raise HTTPException(status_code=404, detail="Stream not found or expired")
-    
-    # Get the actual stream URL from YouTube
-    stream_url = await YouTubeAPI.get_stream_url_static(original_query, video)
-    if not stream_url:
-        raise HTTPException(status_code=404, detail="Stream not found")
-    
-    # Redirect to the actual YouTube stream URL
-    return RedirectResponse(url=stream_url)
+async def stream(request: Request, query: str, video: bool = False):
+    stream_url = await YouTubeAPI.get_stream_url_static(query, video)
+    yt = YouTubeAPI(query)
+    details = await yt._fetch_details()
+    return await make_response(details, stream_url, "Video" if video else "Audio")
 
-# ... [keep all your existing endpoints below] ...
+@app.get("/details")
+@limiter.limit("100/minute")
+async def details(request: Request, link: str, videoid: bool = False):
+    query = f"https://www.youtube.com/watch?v={link}" if videoid else link
+    yt = YouTubeAPI(query)
+    details = await yt._fetch_details()
+    return await make_response(details)
+
+@app.get("/track")
+@limiter.limit("100/minute")
+async def track(request: Request, link: str, videoid: bool = False):
+    query = f"https://www.youtube.com/watch?v={link}" if videoid else link
+    yt = YouTubeAPI(query)
+    info, vidid = await yt.track()
+    return {"track": info, "vidid": vidid}
+
+@app.get("/playlist")
+@limiter.limit("100/minute")
+async def playlist(request: Request, link: str, limit: int = 100, user_id: Optional[str] = None, videoid: bool = False):
+    query = f"https://www.youtube.com/playlist?list={link}" if videoid else link
+    yt = YouTubeAPI(query)
+    items = await yt.playlist(limit)
+    return {"items": items, "limit": limit}
+
+@app.get("/formats")
+@limiter.limit("100/minute")
+async def formats(request: Request, link: str, videoid: bool = False):
+    query = f"https://www.youtube.com/watch?v={link}" if videoid else link
+    yt = YouTubeAPI(query)
+    fmts = await yt.formats()
+    return {"formats": fmts}
+
+@app.get("/slider")
+@limiter.limit("100/minute")
+async def slider(request: Request, link: str, query_type: str = "video", videoid: bool = False):
+    query = f"https://www.youtube.com/watch?v={link}" if videoid else link
+    yt = YouTubeAPI(query)
+    results = await yt.slider(query_type)
+    return {"results": results}
+
+@app.post("/download")
+@limiter.limit("50/minute")
+async def download(request: Request, link: str, video: bool = False, videoid: bool = False, songaudio: bool = False, songvideo: bool = False, format_id: Optional[str] = None, title: Optional[str] = None):
+    query = f"https://www.youtube.com/watch?v={link}" if videoid else link
+    yt = YouTubeAPI(query)
+    if songaudio:
+        format_id = "bestaudio[ext=m4a]"
+    elif songvideo:
+        format_id = "bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+    download_url = await yt.download(video, format_id, title)
+    details = await yt._fetch_details()
+    return await make_response(details, stream_url=download_url, stream_type="Video" if video else "Audio")
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+                
