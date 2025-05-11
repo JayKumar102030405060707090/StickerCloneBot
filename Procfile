@@ -1,1 +1,1 @@
-web: uvicorn main:app --host=0.0.0.0 --port=${PORT:-8000}
+web: gunicorn wsgi:app --worker-class gevent --workers 2 --timeout 120
