@@ -1,11 +1,11 @@
 from flask import Flask, request, Response
-import yt_dlp
 import json
-import os
 import requests
+from pytube import YouTube
 from collections import OrderedDict
 
 app = Flask(__name__)
+
 VALID_API_KEY = "1a873582a7c83342f961cc0a177b2b26"
 YOUTUBE_DATA_API_KEY = "AIzaSyAOorokSXnBGeDFte5_LoxXWh6MYPIOq7I"
 
@@ -34,27 +34,20 @@ def build_fixed_response(info, stream_url=None, stream_type=None):
     ])
 
 def fetch_video_info(video_id):
-    url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id={video_id}&key={YOUTUBE_DATA_API_KEY}"
-    response = requests.get(url)
-    result = response.json()
-    if "items" not in result or not result["items"]:
+    try:
+        video = YouTube(f'https://www.youtube.com/watch?v={video_id}')
+        info = {
+            "id": video.video_id,
+            "title": video.title,
+            "duration": video.length,
+            "channelTitle": video.author,
+            "viewCount": video.views,
+            "thumbnail": video.thumbnail_url
+        }
+        return info
+    except Exception as e:
+        print(f"Error fetching video info: {e}")
         return None
-    item = result["items"][0]
-    duration = parse_duration(item["contentDetails"]["duration"])
-    info = {
-        "id": item["id"],
-        "title": item["snippet"]["title"],
-        "duration": duration,
-        "channelTitle": item["snippet"]["channelTitle"],
-        "viewCount": int(item["statistics"].get("viewCount", 0)),
-        "thumbnail": item["snippet"]["thumbnails"]["high"]["url"]
-    }
-    return info
-
-def parse_duration(duration_str):
-    import isodate
-    duration = isodate.parse_duration(duration_str)
-    return int(duration.total_seconds())
 
 @app.route("/details")
 def details():
@@ -140,44 +133,25 @@ def get_stream():
     if not query:
         return error_response("Missing 'query' parameter")
 
-    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "geo_bypass": True,
-        "user_agent": user_agent,
-        "format": "bestvideo[height<=720]+bestaudio/best" if is_video else "bestaudio/best"
-    }
+    search_url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&q={query}&key={YOUTUBE_DATA_API_KEY}"
+    response = requests.get(search_url)
+    result = response.json()
 
-    query_string = f"ytsearch1:{query}" if "youtu" not in query else query
+    if "items" not in result or not result["items"]:
+        return error_response("No results found")
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query_string, download=False)
-            if 'entries' in info:
-                info = info['entries'][0]
+        selected = result["items"][0]
+        video_id = selected["id"]["videoId"]
+        info = fetch_video_info(video_id)
+        if not info:
+            return error_response("Video not found")
 
-            stream_url = None
-            if is_video:
-                stream_url = next((
-                    f["url"] for f in info["formats"]
-                    if f.get("ext") == "mp4"
-                    and f.get("vcodec") != "none"
-                    and f.get("acodec") != "none"
-                    and f.get("height", 0) <= 720
-                ), None)
-                stream_type = "Video"
-            else:
-                stream_url = info.get("url")
-                stream_type = "Audio"
+        stream_url = f"https://www.youtube.com/watch?v={video_id}"
+        stream_type = "Video" if is_video else "Audio"
 
-            video_id = info.get("id")
-            info_fetched = fetch_video_info(video_id)
-            if not info_fetched:
-                return error_response("Video info fetch failed")
-            response_data = build_fixed_response(info_fetched, stream_url, stream_type)
-            return success_response(response_data)
-
+        response_data = build_fixed_response(info, stream_url, stream_type)
+        return success_response(response_data)
     except Exception as e:
         return error_response(str(e), 500)
 
@@ -190,27 +164,20 @@ def formats():
     if not link:
         return error_response("Missing 'link' parameter")
 
-    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "geo_bypass": True,
-        "user_agent": user_agent
-    }
-
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(link, download=False)
-            formats_available = []
-            for f in info["formats"]:
-                if f.get("ext") and not f.get("format_note") == "DASH":
-                    formats_available.append({
-                        "format": f.get("format"),
-                        "filesize": f.get("filesize"),
-                        "format_id": f.get("format_id"),
-                        "ext": f.get("ext"),
-                        "format_note": f.get("format_note")
-                    })
+        video_id = extract_video_id(link)
+        if not video_id:
+            return error_response("Invalid YouTube link")
+
+        info = fetch_video_info(video_id)
+        if not info:
+            return error_response("Video not found")
+
+        formats_available = [{
+            "format": "mp4",
+            "ext": "mp4",
+            "format_note": "HD"
+        }]
         return success_response({"formats": formats_available})
     except Exception as e:
         return error_response(str(e), 500)
