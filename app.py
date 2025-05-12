@@ -1,7 +1,6 @@
 from flask import Flask, request, Response
 import json
 import requests
-from pytube import YouTube
 from collections import OrderedDict
 
 app = Flask(__name__)
@@ -34,20 +33,27 @@ def build_fixed_response(info, stream_url=None, stream_type=None):
     ])
 
 def fetch_video_info(video_id):
-    try:
-        video = YouTube(f'https://www.youtube.com/watch?v={video_id}')
-        info = {
-            "id": video.video_id,
-            "title": video.title,
-            "duration": video.length,
-            "channelTitle": video.author,
-            "viewCount": video.views,
-            "thumbnail": video.thumbnail_url
-        }
-        return info
-    except Exception as e:
-        print(f"Error fetching video info: {e}")
+    url = f"https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id={video_id}&key={YOUTUBE_DATA_API_KEY}"
+    response = requests.get(url)
+    result = response.json()
+    if "items" not in result or not result["items"]:
         return None
+    item = result["items"][0]
+    duration = parse_duration(item["contentDetails"]["duration"])
+    info = {
+        "id": item["id"],
+        "title": item["snippet"]["title"],
+        "duration": duration,
+        "channelTitle": item["snippet"]["channelTitle"],
+        "viewCount": int(item["statistics"].get("viewCount", 0)),
+        "thumbnail": item["snippet"]["thumbnails"]["high"]["url"]
+    }
+    return info
+
+def parse_duration(duration_str):
+    import isodate
+    duration = isodate.parse_duration(duration_str)
+    return int(duration.total_seconds())
 
 @app.route("/details")
 def details():
